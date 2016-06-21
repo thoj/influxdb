@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/apex/log"
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
 )
@@ -27,7 +28,7 @@ type Engine interface {
 	Open() error
 	Close() error
 
-	SetLogOutput(io.Writer)
+	WithLogger(log.Interface)
 	LoadMetadataIndex(shardID uint64, index *DatabaseIndex) error
 
 	Backup(w io.Writer, basePath string, since time.Time) error

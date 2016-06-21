@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/apex/log"
 	"github.com/golang/snappy"
 	"github.com/influxdata/influxdb/models"
 )
@@ -79,9 +79,7 @@ type WAL struct {
 	// cache and flush variables
 	closing chan struct{}
 
-	// WALOutput is the writer used by the logger.
-	LogOutput io.Writer
-	logger    *log.Logger
+	logger log.Interface
 
 	// SegmentSize is the file size at which a segment file will be rotated
 	SegmentSize int
@@ -98,18 +96,23 @@ func NewWAL(path string) *WAL {
 		path: path,
 
 		// these options should be overriden by any options in the config
-		LogOutput:   os.Stderr,
 		SegmentSize: DefaultSegmentSize,
-		logger:      log.New(os.Stderr, "[tsm1wal] ", log.LstdFlags),
-		closing:     make(chan struct{}),
-		stats:       &WALStatistics{},
+		logger: log.WithFields(log.Fields{
+			"engine": "tsm1wal",
+			"path":   path,
+		}),
+		closing: make(chan struct{}),
+		stats:   &WALStatistics{},
 	}
 }
 
-// SetLogOutput sets the location that logs are written to. It must not be
+// WithLogger sets the logger to augment for log messages. It must not be
 // called after the Open method has been called.
-func (l *WAL) SetLogOutput(w io.Writer) {
-	l.logger = log.New(w, "[tsm1wal] ", log.LstdFlags)
+func (l *WAL) WithLogger(li log.Interface) {
+	l.logger = li.WithFields(log.Fields{
+		"engine": "tsm1wal",
+		"path":   l.path,
+	})
 }
 
 // WALStatistics maintains statistics about the WAL.
@@ -143,8 +146,8 @@ func (l *WAL) Open() error {
 	defer l.mu.Unlock()
 
 	if l.LoggingEnabled {
-		l.logger.Printf("tsm1 WAL starting with %d segment size\n", l.SegmentSize)
-		l.logger.Printf("tsm1 WAL writing to %s\n", l.path)
+		l.logger.Infof("tsm1 WAL starting with %d segment size", l.SegmentSize)
+		l.logger.Infof("tsm1 WAL writing to %s", l.path)
 	}
 	if err := os.MkdirAll(l.path, 0777); err != nil {
 		return err

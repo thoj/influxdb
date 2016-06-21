@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/apex/log"
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/tsdb"
@@ -60,7 +60,7 @@ type Engine struct {
 	compactionsEnabled bool
 
 	path      string
-	logger    *log.Logger
+	logger    log.Interface
 	logOutput io.Writer
 
 	// TODO(benbjohnson): Index needs to be moved entirely into engine.
@@ -125,7 +125,7 @@ func NewEngine(path string, walPath string, opt tsdb.EngineOptions) tsdb.Engine 
 		enableCompactionsOnOpen:       true,
 		stats: &EngineStatistics{},
 	}
-	e.SetLogOutput(os.Stderr)
+	e.WithLogger(log.Log)
 
 	return e
 }
@@ -158,7 +158,7 @@ func (e *Engine) SetCompactionsEnabled(enabled bool) {
 		go e.compactTSMLevel(true, 2)
 		go e.compactTSMLevel(false, 3)
 
-		e.logger.Printf("compactions enabled for: %v", e.path)
+		e.logger.Infof("compactions enabled")
 	} else {
 		e.mu.Lock()
 		if !e.compactionsEnabled {
@@ -178,7 +178,7 @@ func (e *Engine) SetCompactionsEnabled(enabled bool) {
 		// Wait for compaction goroutines to exit
 		e.wg.Wait()
 
-		e.logger.Printf("compactions disabled for: %v", e.path)
+		e.logger.Infof("compactions disabled")
 	}
 }
 
@@ -301,13 +301,12 @@ func (e *Engine) Close() error {
 	return e.WAL.Close()
 }
 
-// SetLogOutput sets the logger used for all messages. It must not be called
-// after the Open method has been called.
-func (e *Engine) SetLogOutput(w io.Writer) {
-	e.logger = log.New(w, "[tsm1] ", log.LstdFlags)
-	e.WAL.SetLogOutput(w)
-	e.FileStore.SetLogOutput(w)
-	e.logOutput = w
+// WithLogger sets the logger to augment for log messages. It must not be
+// called after the Open method has been called.
+func (e *Engine) WithLogger(l log.Interface) {
+	e.logger = l.WithField("engine", "tsm1")
+	e.WAL.WithLogger(e.logger)
+	e.FileStore.WithLogger(e.logger)
 }
 
 // LoadMetadataIndex loads the shard metadata into memory.
@@ -337,7 +336,7 @@ func (e *Engine) LoadMetadataIndex(shardID uint64, index *tsdb.DatabaseIndex) er
 
 		fieldType, err := entry.values.InfluxQLType()
 		if err != nil {
-			e.logger.Printf("error getting the data type of values for key %s: %s", key, err.Error())
+			e.logger.Errorf("error getting the data type of values for key %s: %s", key, err.Error())
 			continue
 		}
 
@@ -730,7 +729,7 @@ func (e *Engine) writeSnapshotAndCommit(closedFiles []string, snapshot *Cache) (
 	// write the new snapshot files
 	newFiles, err := e.Compactor.WriteSnapshot(snapshot)
 	if err != nil {
-		e.logger.Printf("error writing snapshot from compactor: %v", err)
+		e.logger.WithError(err).Error("writing snapshot from compactor")
 		return err
 	}
 
@@ -739,7 +738,7 @@ func (e *Engine) writeSnapshotAndCommit(closedFiles []string, snapshot *Cache) (
 
 	// update the file store with these new files
 	if err := e.FileStore.Replace(nil, newFiles); err != nil {
-		e.logger.Printf("error adding new TSM files from snapshot: %v", err)
+		e.logger.WithError(err).Error("adding new TSM files from snapshot")
 		return err
 	}
 
@@ -747,7 +746,7 @@ func (e *Engine) writeSnapshotAndCommit(closedFiles []string, snapshot *Cache) (
 	e.Cache.ClearSnapshot(true)
 
 	if err := e.WAL.Remove(closedFiles); err != nil {
-		e.logger.Printf("error removing closed wal segments: %v", err)
+		e.logger.WithError(err).Error("removing closed wal segments")
 	}
 
 	return nil
@@ -767,7 +766,7 @@ func (e *Engine) compactCache() {
 				start := time.Now()
 				err := e.WriteSnapshot()
 				if err != nil {
-					e.logger.Printf("error writing snapshot: %v", err)
+					e.logger.WithError(err).Error("error writing snapshot")
 					atomic.AddInt64(&e.stats.CacheCompactionErrors, 1)
 				} else {
 					atomic.AddInt64(&e.stats.CacheCompactions, 1)
@@ -817,9 +816,9 @@ func (e *Engine) compactTSMLevel(fast bool, level int) {
 				go func(groupNum int, group CompactionGroup) {
 					defer wg.Done()
 					start := time.Now()
-					e.logger.Printf("beginning level %d compaction of group %d, %d TSM files", level, groupNum, len(group))
+					e.logger.Infof("beginning level %d compaction of group %d, %d TSM files", level, groupNum, len(group))
 					for i, f := range group {
-						e.logger.Printf("compacting level %d group (%d) %s (#%d)", level, groupNum, f, i)
+						e.logger.Infof("compacting level %d group (%d) %s (#%d)", level, groupNum, f, i)
 					}
 
 					var files []string
@@ -828,7 +827,7 @@ func (e *Engine) compactTSMLevel(fast bool, level int) {
 					if fast {
 						files, err = e.Compactor.CompactFast(group)
 						if err != nil {
-							e.logger.Printf("error compacting TSM files: %v", err)
+							e.logger.WithError(err).Error("error compacting TSM files")
 							atomic.AddInt64(&e.stats.TSMCompactionErrors[level-1], 1)
 							time.Sleep(time.Second)
 							return
@@ -836,7 +835,7 @@ func (e *Engine) compactTSMLevel(fast bool, level int) {
 					} else {
 						files, err = e.Compactor.CompactFull(group)
 						if err != nil {
-							e.logger.Printf("error compacting TSM files: %v", err)
+							e.logger.WithError(err).Error("error compacting TSM files")
 							atomic.AddInt64(&e.stats.TSMCompactionErrors[level-1], 1)
 							time.Sleep(time.Second)
 							return
@@ -844,17 +843,17 @@ func (e *Engine) compactTSMLevel(fast bool, level int) {
 					}
 
 					if err := e.FileStore.Replace(group, files); err != nil {
-						e.logger.Printf("error replacing new TSM files: %v", err)
 						atomic.AddInt64(&e.stats.TSMCompactionErrors[level-1], 1)
+						e.logger.WithError(err).Error("error replacing new TSM files")
 						time.Sleep(time.Second)
 						return
 					}
 
 					for i, f := range files {
-						e.logger.Printf("compacted level %d group (%d) into %s (#%d)", level, groupNum, f, i)
+						e.logger.Infof("compacted level %d group (%d) into %s (#%d)", level, groupNum, f, i)
 					}
 					atomic.AddInt64(&e.stats.TSMCompactions[level-1], 1)
-					e.logger.Printf("compacted level %d group %d of %d files into %d files in %s",
+					e.logger.Infof("compacted level %d group %d of %d files into %d files in %s",
 						level, groupNum, len(group), len(files), time.Since(start))
 				}(i, group)
 			}
@@ -891,31 +890,31 @@ func (e *Engine) compactTSMFull() {
 				go func(groupNum int, group CompactionGroup) {
 					defer wg.Done()
 					start := time.Now()
-					e.logger.Printf("beginning full compaction of group %d, %d TSM files", groupNum, len(group))
+					e.logger.Infof("beginning full compaction of group %d, %d TSM files", groupNum, len(group))
 					for i, f := range group {
-						e.logger.Printf("compacting full group (%d) %s (#%d)", groupNum, f, i)
+						e.logger.Infof("compacting full group (%d) %s (#%d)", groupNum, f, i)
 					}
 
 					files, err := e.Compactor.CompactFull(group)
 					if err != nil {
-						e.logger.Printf("error compacting TSM files: %v", err)
+						e.logger.WithError(err).Error("compacting TSM files")
 						atomic.AddInt64(&e.stats.TSMFullCompactionErrors, 1)
 						time.Sleep(time.Second)
 						return
 					}
 
 					if err := e.FileStore.Replace(group, files); err != nil {
-						e.logger.Printf("error replacing new TSM files: %v", err)
+						e.logger.WithError(err).Error("replacing new TSM files")
 						atomic.AddInt64(&e.stats.TSMFullCompactionErrors, 1)
 						time.Sleep(time.Second)
 						return
 					}
 
 					for i, f := range files {
-						e.logger.Printf("compacted full group (%d) into %s (#%d)", groupNum, f, i)
+						e.logger.Infof("compacted full group (%d) into %s (#%d)", groupNum, f, i)
 					}
 					atomic.AddInt64(&e.stats.TSMFullCompactions, 1)
-					e.logger.Printf("compacted full %d files into %d files in %s",
+					e.logger.Infof("compacted full %d files into %d files in %s",
 						len(group), len(files), time.Since(start))
 				}(i, group)
 			}
@@ -943,7 +942,7 @@ func (e *Engine) reloadCache() error {
 	e.Cache.SetMaxSize(0)
 
 	loader := NewCacheLoader(files)
-	loader.SetLogOutput(e.logOutput)
+	loader.WithLogger(e.logger)
 	if err := loader.Load(e.Cache); err != nil {
 		return err
 	}

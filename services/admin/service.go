@@ -3,14 +3,12 @@ package admin // import "github.com/influxdata/influxdb/services/admin"
 import (
 	"crypto/tls"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 
 	// Register static assets via statik.
+	"github.com/apex/log"
 	_ "github.com/influxdata/influxdb/services/admin/statik"
 	"github.com/rakyll/statik/fs"
 )
@@ -24,24 +22,25 @@ type Service struct {
 	err      chan error
 	version  string
 
-	logger *log.Logger
+	logger log.Interface
 }
 
 // NewService returns a new instance of Service.
 func NewService(c Config) *Service {
-	return &Service{
+	s := &Service{
 		addr:    c.BindAddress,
 		https:   c.HTTPSEnabled,
 		cert:    c.HTTPSCertificate,
 		err:     make(chan error),
 		version: c.Version,
-		logger:  log.New(os.Stderr, "[admin] ", log.LstdFlags),
 	}
+	s.WithLogger(log.Log)
+	return s
 }
 
 // Open starts the service
 func (s *Service) Open() error {
-	s.logger.Printf("Starting admin service")
+	s.logger.Info("Starting admin service")
 
 	// Open listener.
 	if s.https {
@@ -57,7 +56,7 @@ func (s *Service) Open() error {
 			return err
 		}
 
-		s.logger.Println("Listening on HTTPS:", listener.Addr().String())
+		s.logger.Infof("Listening on HTTPS: %s", listener.Addr().String())
 		s.listener = listener
 	} else {
 		listener, err := net.Listen("tcp", s.addr)
@@ -65,7 +64,7 @@ func (s *Service) Open() error {
 			return err
 		}
 
-		s.logger.Println("Listening on HTTP:", listener.Addr().String())
+		s.logger.Infof("Listening on HTTP: %s", listener.Addr().String())
 		s.listener = listener
 	}
 
@@ -82,10 +81,10 @@ func (s *Service) Close() error {
 	return nil
 }
 
-// SetLogOutput sets the writer to which all logs are written. It must not be
-// called after Open is called.
-func (s *Service) SetLogOutput(w io.Writer) {
-	s.logger = log.New(w, "[admin] ", log.LstdFlags)
+// WithLogger sets the logger to augment for log messages. It must not be
+// called after the Open method has been called.
+func (s *Service) WithLogger(l log.Interface) {
+	s.logger = l.WithField("service", "admin")
 }
 
 // Err returns a channel for fatal errors that occur on the listener.

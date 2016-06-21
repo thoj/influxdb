@@ -2,8 +2,6 @@ package tsm1
 
 import (
 	"fmt"
-	"io"
-	"log"
 	"math"
 	"os"
 	"sort"
@@ -11,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/apex/log"
 	"github.com/influxdata/influxdb/models"
 )
 
@@ -514,14 +513,14 @@ func (c *Cache) entry(key string) *entry {
 type CacheLoader struct {
 	files []string
 
-	Logger *log.Logger
+	Logger log.Interface
 }
 
 // NewCacheLoader returns a new instance of a CacheLoader.
 func NewCacheLoader(files []string) *CacheLoader {
 	return &CacheLoader{
 		files:  files,
-		Logger: log.New(os.Stderr, "[cacheloader] ", log.LstdFlags),
+		Logger: log.WithField("service", "cacheloader"),
 	}
 }
 
@@ -542,7 +541,7 @@ func (cl *CacheLoader) Load(cache *Cache) error {
 			if err != nil {
 				return err
 			}
-			cl.Logger.Printf("reading file %s, size %d", f.Name(), stat.Size())
+			cl.Logger.WithField("path", f.Name()).Infof("reading file with size %d", stat.Size())
 
 			r := NewWALSegmentReader(f)
 			defer r.Close()
@@ -551,7 +550,7 @@ func (cl *CacheLoader) Load(cache *Cache) error {
 				entry, err := r.Read()
 				if err != nil {
 					n := r.Count()
-					cl.Logger.Printf("file %s corrupt at position %d, truncating", f.Name(), n)
+					cl.Logger.WithField("path", f.Name()).Infof("file corrupt at position %d, truncating", n)
 					if err := f.Truncate(n); err != nil {
 						return err
 					}
@@ -578,10 +577,9 @@ func (cl *CacheLoader) Load(cache *Cache) error {
 	return nil
 }
 
-// SetLogOutput sets the logger used for all messages. It must not be called
-// after the Open method has been called.
-func (cl *CacheLoader) SetLogOutput(w io.Writer) {
-	cl.Logger = log.New(w, "[cacheloader] ", log.LstdFlags)
+// WithLogger sets the logger to augment for log messages.
+func (cl *CacheLoader) WithLogger(l log.Interface) {
+	cl.Logger = l.WithField("service", "cacheloader")
 }
 
 // Updates the age statistic

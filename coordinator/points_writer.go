@@ -2,13 +2,11 @@ package coordinator
 
 import (
 	"errors"
-	"io"
-	"log"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/apex/log"
 	"github.com/influxdata/influxdb"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/services/meta"
@@ -45,7 +43,7 @@ type PointsWriter struct {
 	mu           sync.RWMutex
 	closing      chan struct{}
 	WriteTimeout time.Duration
-	Logger       *log.Logger
+	Logger       log.Interface
 
 	Node *influxdb.Node
 
@@ -93,12 +91,13 @@ func (w *WritePointsRequest) AddPoint(name string, value interface{}, timestamp 
 
 // NewPointsWriter returns a new instance of PointsWriter for a node.
 func NewPointsWriter() *PointsWriter {
-	return &PointsWriter{
+	w := &PointsWriter{
 		closing:      make(chan struct{}),
 		WriteTimeout: DefaultWriteTimeout,
-		Logger:       log.New(os.Stderr, "[write] ", log.LstdFlags),
 		stats:        &WriteStatistics{},
 	}
+	w.WithLogger(log.Log)
+	return w
 }
 
 // ShardMapping contains a mapping of a shards to a points.
@@ -153,10 +152,10 @@ func (w *PointsWriter) Close() error {
 	return nil
 }
 
-// SetLogOutput sets the writer to which all logs are written. It must not be
-// called after Open is called.
-func (w *PointsWriter) SetLogOutput(lw io.Writer) {
-	w.Logger = log.New(lw, "[write] ", log.LstdFlags)
+// WithLogger sets the logger to augment for log messages. It must not be
+// called after the Open method has been called.
+func (w *PointsWriter) WithLogger(l log.Interface) {
+	w.Logger = log.WithField("service", "write")
 }
 
 // WriteStatistics keeps statistics related to the PointsWriter.
@@ -329,15 +328,14 @@ func (w *PointsWriter) writeToShard(shard *meta.ShardInfo, database, retentionPo
 	if err == tsdb.ErrShardNotFound {
 		err = w.TSDBStore.CreateShard(database, retentionPolicy, shard.ID, true)
 		if err != nil {
-			w.Logger.Printf("write failed for shard %d: %v", shard.ID, err)
-
+			w.Logger.WithField("shard", shard.ID).WithError(err).Error("write failed")
 			atomic.AddInt64(&w.stats.WriteErr, 1)
 			return err
 		}
 	}
 	err = w.TSDBStore.WriteToShard(shard.ID, points)
 	if err != nil {
-		w.Logger.Printf("write failed for shard %d: %v", shard.ID, err)
+		w.Logger.WithField("shard", shard.ID).WithError(err).Error("write failed")
 		atomic.AddInt64(&w.stats.WriteErr, 1)
 		return err
 	}
