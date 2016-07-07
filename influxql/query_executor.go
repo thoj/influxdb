@@ -66,6 +66,9 @@ type ExecutionOptions struct {
 
 	// Node to execute on.
 	NodeID uint64
+
+	// Return float values with no exponent.
+	NoExponent bool
 }
 
 // ExecutionContext contains state that the query is currently executing with.

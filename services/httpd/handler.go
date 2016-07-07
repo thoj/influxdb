@@ -269,6 +269,7 @@ func (h *Handler) serveQuery(w http.ResponseWriter, r *http.Request, user *meta.
 	}(time.Now())
 
 	pretty := r.FormValue("pretty") == "true"
+	noExponent := r.FormValue("no_exponent") == "true"
 	nodeID, _ := strconv.ParseUint(r.FormValue("node_id"), 10, 64)
 
 	qp := strings.TrimSpace(r.FormValue("q"))
@@ -370,10 +371,11 @@ func (h *Handler) serveQuery(w http.ResponseWriter, r *http.Request, user *meta.
 	w.Header().Add("Connection", "close")
 	w.Header().Add("Content-Type", "application/json")
 	results := h.QueryExecutor.ExecuteQuery(query, influxql.ExecutionOptions{
-		Database:  db,
-		ChunkSize: chunkSize,
-		ReadOnly:  r.Method == "GET",
-		NodeID:    nodeID,
+		Database:   db,
+		ChunkSize:  chunkSize,
+		ReadOnly:   r.Method == "GET",
+		NodeID:     nodeID,
+		NoExponent: noExponent,
 	}, closing)
 
 	// if we're not chunking, this will be the in memory buffer for all results before sending to client
@@ -959,24 +961,6 @@ func (r Response) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(&o)
-}
-
-// UnmarshalJSON decodes the data into the Response struct
-func (r *Response) UnmarshalJSON(b []byte) error {
-	var o struct {
-		Results []*influxql.Result `json:"results,omitempty"`
-		Err     string             `json:"error,omitempty"`
-	}
-
-	err := json.Unmarshal(b, &o)
-	if err != nil {
-		return err
-	}
-	r.Results = o.Results
-	if o.Err != "" {
-		r.Err = errors.New(o.Err)
-	}
-	return nil
 }
 
 // Error returns the first error from any statement.
