@@ -122,7 +122,7 @@ const (
 type Cache struct {
 	commit  sync.Mutex
 	mu      sync.RWMutex
-	store   map[string]*entry
+	store   CacheStore
 	size    uint64
 	maxSize uint64
 
@@ -145,7 +145,7 @@ type Cache struct {
 func NewCache(maxSize uint64, path string) *Cache {
 	c := &Cache{
 		maxSize:      maxSize,
-		store:        make(map[string]*entry),
+		store:        make(CacheStore),
 		stats:        &CacheStatistics{},
 		lastSnapshot: time.Now(),
 	}
@@ -196,7 +196,8 @@ func (c *Cache) Write(key string, values []Value) error {
 		return ErrCacheMemoryExceeded
 	}
 
-	c.write(key, values)
+	ck := StringToCompositeKey(key)
+	c.write(ck, values)
 	c.size = newSize
 	c.mu.Unlock()
 
@@ -224,7 +225,8 @@ func (c *Cache) WriteMulti(values map[string][]Value) error {
 	c.mu.RUnlock()
 
 	for k, v := range values {
-		c.entry(k).add(v)
+		ck := StringToCompositeKey(k)
+		c.entry(ck).add(v)
 	}
 	c.mu.Lock()
 	c.size += uint64(totalSz)
@@ -252,29 +254,34 @@ func (c *Cache) Snapshot() (*Cache, error) {
 	// If no snapshot exists, create a new one, otherwise update the existing snapshot
 	if c.snapshot == nil {
 		c.snapshot = &Cache{
-			store: make(map[string]*entry),
+			store: make(CacheStore, len(c.store)),
 		}
 	}
 
 	// Append the current cache values to the snapshot
-	for k, e := range c.store {
-		e.mu.RLock()
-		if _, ok := c.snapshot.store[k]; ok {
-			c.snapshot.store[k].add(e.values)
+	f := func(ck CompositeKey, cacheEntry *entry) error {
+		cacheEntry.mu.RLock()
+		if snapshotEntry, ok := c.snapshot.store.GetChecked(ck); ok {
+			snapshotEntry.add(cacheEntry.values)
 		} else {
-			c.snapshot.store[k] = e
+			c.snapshot.store.Put(ck, cacheEntry)
 		}
-		c.snapshotSize += uint64(Values(e.values).Size())
-		if e.needSort {
-			c.snapshot.store[k].needSort = true
+		c.snapshotSize += uint64(Values(cacheEntry.values).Size())
+		if cacheEntry.needSort {
+			c.snapshot.store.Get(ck).needSort = true
 		}
-		e.mu.RUnlock()
+		cacheEntry.mu.RUnlock()
+		return nil
+	}
+	err := c.store.Iter(f)
+	if err != nil {
+		return nil, err
 	}
 
 	snapshotSize := c.size // record the number of bytes written into a snapshot
 
-	// Reset the cache
-	c.store = make(map[string]*entry)
+	// Reset the cache with a heuristic capacity
+	c.store = make(CacheStore, len(c.store))
 	c.size = 0
 	c.lastSnapshot = time.Now()
 
@@ -289,8 +296,10 @@ func (c *Cache) Snapshot() (*Cache, error) {
 // coming in while it writes will need the values sorted
 func (c *Cache) Deduplicate() {
 	c.mu.RLock()
-	for _, e := range c.store {
-		e.deduplicate()
+	for _, ss := range c.store {
+		for _, e := range ss.data {
+			e.deduplicate()
+		}
 	}
 	c.mu.RUnlock()
 }
@@ -330,18 +339,22 @@ func (c *Cache) Keys() []string {
 	defer c.mu.RUnlock()
 
 	var a []string
-	for k, _ := range c.store {
+	f := func(ck CompositeKey, _ *entry) error {
+		k := ck.StringKey()
 		a = append(a, k)
+		return nil
 	}
+	c.store.Iter(f)
 	sort.Strings(a)
 	return a
 }
 
 // Values returns a copy of all values, deduped and sorted, for the given key.
 func (c *Cache) Values(key string) Values {
+	ck := StringToCompositeKey(key)
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.merged(key)
+	return c.merged(ck)
 }
 
 // Delete will remove the keys from the cache
@@ -356,22 +369,30 @@ func (c *Cache) DeleteRange(keys []string, min, max int64) {
 	defer c.mu.Unlock()
 
 	for _, k := range keys {
-		// Make sure key exist in the cache, skip if it does not
-		e, ok := c.store[k]
+		ck := StringToCompositeKey(k)
+		sub, ok := c.store[ck.SeriesKey]
 		if !ok {
+			continue
+		}
+
+		e, ok2 := sub.data[ck.FieldKey]
+		if !ok2 {
 			continue
 		}
 
 		origSize := e.size()
 		if min == math.MinInt64 && max == math.MaxInt64 {
 			c.size -= uint64(origSize)
-			delete(c.store, k)
+
+			// may leave empty parents
+			delete(sub.data, ck.FieldKey)
 			continue
 		}
 
 		e.filter(min, max)
 		if e.count() == 0 {
-			delete(c.store, k)
+			// may leave empty parents
+			delete(sub.data, ck.FieldKey)
 			c.size -= uint64(origSize)
 			continue
 		}
@@ -390,8 +411,8 @@ func (c *Cache) SetMaxSize(size uint64) {
 // sorted. It assumes all necessary locks have been taken. If the caller knows that the
 // the hot source data for the key will not be changed, it is safe to call this function
 // with a read-lock taken. Otherwise it must be called with a write-lock taken.
-func (c *Cache) merged(key string) Values {
-	e := c.store[key]
+func (c *Cache) merged(ck CompositeKey) Values {
+	e := c.store.Get(ck)
 	if e == nil {
 		if c.snapshot == nil {
 			// No values in hot cache or snapshots.
@@ -407,7 +428,7 @@ func (c *Cache) merged(key string) Values {
 	sz := 0
 
 	if c.snapshot != nil {
-		snapshotEntries := c.snapshot.store[key]
+		snapshotEntries := c.snapshot.store.Get(ck)
 		if snapshotEntries != nil {
 			snapshotEntries.deduplicate() // guarantee we are deduplicated
 			entries = append(entries, snapshotEntries)
@@ -450,7 +471,7 @@ func (c *Cache) merged(key string) Values {
 
 // Store returns the underlying cache store. This is not goroutine safe!
 // Protect access by using the Lock and Unlock functions on Cache.
-func (c *Cache) Store() map[string]*entry {
+func (c *Cache) Store() CacheStore {
 	return c.store
 }
 
@@ -465,7 +486,8 @@ func (c *Cache) RUnlock() {
 // values returns the values for the key. It doesn't lock and assumes the data is
 // already sorted. Should only be used in compact.go in the CacheKeyIterator
 func (c *Cache) values(key string) Values {
-	e := c.store[key]
+	ck := StringToCompositeKey(key)
+	e := c.store.Get(ck)
 	if e == nil {
 		return nil
 	}
@@ -474,19 +496,19 @@ func (c *Cache) values(key string) Values {
 
 // write writes the set of values for the key to the cache. This function assumes
 // the lock has been taken and does not enforce the cache size limits.
-func (c *Cache) write(key string, values []Value) {
-	e, ok := c.store[key]
+func (c *Cache) write(ck CompositeKey, values []Value) {
+	e, ok := c.store.GetChecked(ck)
 	if !ok {
 		e = newEntry()
-		c.store[key] = e
+		c.store.Put(ck, e)
 	}
 	e.add(values)
 }
 
-func (c *Cache) entry(key string) *entry {
+func (c *Cache) entry(ck CompositeKey) *entry {
 	// low-contention path: entry exists, no write operations needed:
 	c.mu.RLock()
-	e, ok := c.store[key]
+	e, ok := c.store.GetChecked(ck)
 	c.mu.RUnlock()
 
 	if ok {
@@ -497,10 +519,10 @@ func (c *Cache) entry(key string) *entry {
 	// one after checking again:
 	c.mu.Lock()
 
-	e, ok = c.store[key]
+	e, ok = c.store.GetChecked(ck)
 	if !ok {
 		e = newEntry()
-		c.store[key] = e
+		c.store.Put(ck, e)
 	}
 
 	c.mu.Unlock()
