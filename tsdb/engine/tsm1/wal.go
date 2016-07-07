@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"math"
 	"os"
@@ -80,14 +81,13 @@ type WAL struct {
 	closing chan struct{}
 
 	// WALOutput is the writer used by the logger.
-	logger    *log.Logger
-	logOutput io.Writer
+	logger       *log.Logger // Logger to be used for important messages
+	traceLogger  *log.Logger // Logger to be used when trace-logging is on.
+	logOutput    io.Writer   // Writer to be logger and traceLogger if active.
+	traceLogging bool
 
 	// SegmentSize is the file size at which a segment file will be rotated
 	SegmentSize int
-
-	// LoggingEnabled specifies if detailed logs should be output
-	LoggingEnabled bool
 
 	// statistics for the WAL
 	stats *WALStatistics
@@ -102,7 +102,16 @@ func NewWAL(path string) *WAL {
 		closing:     make(chan struct{}),
 		stats:       &WALStatistics{},
 		logger:      log.New(os.Stderr, "[tsm1wal] ", log.LstdFlags),
+		traceLogger: log.New(ioutil.Discard, "[tsm1wal] ", log.LstdFlags),
 		logOutput:   os.Stderr,
+	}
+}
+
+// enableTraceLogging must be called before the WAL is opened.
+func (l *WAL) enableTraceLogging(enabled bool) {
+	l.traceLogging = enabled
+	if enabled {
+		l.traceLogger.SetOutput(l.logOutput)
 	}
 }
 
@@ -110,6 +119,11 @@ func NewWAL(path string) *WAL {
 // concurrent use.
 func (l *WAL) SetLogOutput(w io.Writer) {
 	l.logger.SetOutput(w)
+
+	// Set the trace logger's output only if trace logging is enabled.
+	if l.traceLogging {
+		l.traceLogger.SetOutput(w)
+	}
 
 	l.mu.Lock()
 	l.logOutput = w
@@ -146,10 +160,9 @@ func (l *WAL) Open() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if l.LoggingEnabled {
-		l.logger.Printf("tsm1 WAL starting with %d segment size\n", l.SegmentSize)
-		l.logger.Printf("tsm1 WAL writing to %s\n", l.path)
-	}
+	l.traceLogger.Printf("tsm1 WAL starting with %d segment size\n", l.SegmentSize)
+	l.traceLogger.Printf("tsm1 WAL writing to %s\n", l.path)
+
 	if err := os.MkdirAll(l.path, 0777); err != nil {
 		return err
 	}
