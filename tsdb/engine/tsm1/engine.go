@@ -329,6 +329,8 @@ func (e *Engine) SetLogOutput(w io.Writer) {
 
 // LoadMetadataIndex loads the shard metadata into memory.
 func (e *Engine) LoadMetadataIndex(shardID uint64, index *tsdb.DatabaseIndex) error {
+	now := time.Now()
+
 	// Save reference to index for iterator creation.
 	e.index = index
 
@@ -363,6 +365,7 @@ func (e *Engine) LoadMetadataIndex(shardID uint64, index *tsdb.DatabaseIndex) er
 		}
 	}
 
+	e.traceLogger.Printf("Meta data index for shard %d loaded in %v", shardID, time.Since(now))
 	return nil
 }
 
@@ -684,6 +687,7 @@ func (e *Engine) WriteSnapshot() error {
 	defer func() {
 		if started != nil {
 			e.Cache.UpdateCompactTime(time.Now().Sub(*started))
+			e.traceLogger.Printf("Snapshot written in %v", time.Since(*started))
 		}
 	}()
 
@@ -718,7 +722,9 @@ func (e *Engine) WriteSnapshot() error {
 	// The snapshotted cache may have duplicate points and unsorted data.  We need to deduplicate
 	// it before writing the snapshot.  This can be very expensive so it's done while we are not
 	// holding the engine write lock.
+	dedup := time.Now()
 	snapshot.Deduplicate()
+	e.traceLogger.Printf("Snapshot deduplicated in %v", time.Since(dedup))
 
 	return e.writeSnapshotAndCommit(closedFiles, snapshot)
 }
@@ -782,6 +788,7 @@ func (e *Engine) compactCache() {
 			e.Cache.UpdateAge()
 			if e.ShouldCompactCache(e.WAL.LastWriteTime()) {
 				start := time.Now()
+				e.traceLogger.Print("Compacting cache")
 				err := e.WriteSnapshot()
 				if err != nil {
 					e.logger.Printf("error writing snapshot: %v", err)
@@ -946,6 +953,7 @@ func (e *Engine) compactTSMFull() {
 
 // reloadCache reads the WAL segment files and loads them into the cache.
 func (e *Engine) reloadCache() error {
+	now := time.Now()
 	files, err := segmentFileNames(e.WAL.Path())
 	if err != nil {
 		return err
@@ -965,6 +973,7 @@ func (e *Engine) reloadCache() error {
 		return err
 	}
 
+	e.traceLogger.Printf("Reloaded WAL cache %s in %v", e.WAL.Path(), time.Since(now))
 	return nil
 }
 
