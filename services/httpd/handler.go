@@ -327,15 +327,33 @@ func (h *Handler) serveQuery(w http.ResponseWriter, r *http.Request, user *meta.
 	pretty := r.FormValue("pretty") == "true"
 	nodeID, _ := strconv.ParseUint(r.FormValue("node_id"), 10, 64)
 
-	qp := strings.TrimSpace(r.FormValue("q"))
-	if qp == "" {
-		h.httpError(w, `missing required parameter "q"`, pretty, http.StatusBadRequest)
-		return
+	var qr io.Reader
+	if r.MultipartForm != nil && r.MultipartForm.File != nil {
+		// If we have a multipart/form-data, try to retrieve a file from 'q'.
+		if fhs := r.MultipartForm.File["q"]; len(fhs) > 0 {
+			f, err := fhs[0].Open()
+			if err != nil {
+				h.httpError(w, err.Error(), pretty, http.StatusBadRequest)
+				return
+			}
+			defer f.Close()
+			qr = f
+		}
+	}
+
+	if qr == nil {
+		// Attempt to read the form value from the "q" form value.
+		qp := strings.TrimSpace(r.FormValue("q"))
+		if qp == "" {
+			h.httpError(w, `missing required parameter "q"`, pretty, http.StatusBadRequest)
+			return
+		}
+		qr = strings.NewReader(qp)
 	}
 
 	epoch := strings.TrimSpace(r.FormValue("epoch"))
 
-	p := influxql.NewParser(strings.NewReader(qp))
+	p := influxql.NewParser(qr)
 	db := r.FormValue("db")
 
 	// Sanitize the request query params so it doesn't show up in the response logger.
