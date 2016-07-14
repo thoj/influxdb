@@ -1134,6 +1134,28 @@ func (s *SelectStatement) RewriteFields(ic IteratorCreator) (*SelectStatement, e
 					}
 					rwFields = append(rwFields, &Field{Expr: &VarRef{Val: ref.Val, Type: ref.Type}})
 				}
+			case *Call:
+				// Replace a wildcard within a call. Only support calls with one argument
+				// for now.
+				if len(expr.Args) == 0 {
+					continue
+				} else if _, ok := expr.Args[0].(*Wildcard); !ok {
+					continue
+				}
+
+				for _, ref := range fields {
+					// Do not expand tags within a function call. It likely won't do anything
+					// anyway and will be the wrong thing in 99% of cases.
+					if ref.Type == Tag {
+						continue
+					}
+					subexpr := CloneExpr(expr).(*Call)
+					subexpr.Args[0] = &VarRef{Val: ref.Val, Type: ref.Type}
+					rwFields = append(rwFields, &Field{
+						Expr:  subexpr,
+						Alias: fmt.Sprintf("%s_%s", f.Name(), ref.Val),
+					})
+				}
 			default:
 				rwFields = append(rwFields, f)
 			}
@@ -1357,15 +1379,17 @@ func (s *SelectStatement) HasWildcard() bool {
 }
 
 // HasFieldWildcard returns whether or not the select statement has at least 1 wildcard in the fields
-func (s *SelectStatement) HasFieldWildcard() bool {
-	for _, f := range s.Fields {
-		_, ok := f.Expr.(*Wildcard)
-		if ok {
-			return true
+func (s *SelectStatement) HasFieldWildcard() (hasWildcard bool) {
+	WalkFunc(s.Fields, func(n Node) {
+		if hasWildcard {
+			return
 		}
-	}
-
-	return false
+		_, ok := n.(*Wildcard)
+		if ok {
+			hasWildcard = true
+		}
+	})
+	return hasWildcard
 }
 
 // HasDimensionWildcard returns whether or not the select statement has
@@ -1686,7 +1710,7 @@ func (s *SelectStatement) validateAggregates(tr targetRequirement) error {
 					return fmt.Errorf("invalid number of arguments for %s, expected %d, got %d", expr.Name, exp, got)
 				}
 				switch fc := expr.Args[0].(type) {
-				case *VarRef:
+				case *VarRef, *Wildcard:
 					// do nothing
 				case *Call:
 					if fc.Name != "distinct" || expr.Name != "count" {
