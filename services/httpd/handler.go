@@ -391,7 +391,7 @@ func (h *Handler) serveQuery(w http.ResponseWriter, r *http.Request, user *meta.
 	}
 
 	// Parse chunk size. Use default if not provided or unparsable.
-	chunked := (r.FormValue("chunked") == "true")
+	chunked := r.FormValue("chunked") == "true"
 	chunkSize := DefaultChunkSize
 	if chunked {
 		if n, err := strconv.ParseInt(r.FormValue("chunk_size"), 10, 64); err == nil && int(n) > 0 {
@@ -399,27 +399,33 @@ func (h *Handler) serveQuery(w http.ResponseWriter, r *http.Request, user *meta.
 		}
 	}
 
-	// Make sure if the client disconnects we signal the query to abort
-	closing := make(chan struct{})
-	if notifier, ok := w.(http.CloseNotifier); ok {
-		// CloseNotify() is not guaranteed to send a notification when the query
-		// is closed. Use this channel to signal that the query is finished to
-		// prevent lingering goroutines that may be stuck.
-		done := make(chan struct{})
-		defer close(done)
+	// Parse whether this is a batch command.
+	batch := r.FormValue("batch") == "true"
 
-		notify := notifier.CloseNotify()
-		go func() {
-			// Wait for either the request to finish
-			// or for the client to disconnect
-			select {
-			case <-done:
-			case <-notify:
-				close(closing)
-			}
-		}()
-	} else {
-		defer close(closing)
+	// Make sure if the client disconnects we signal the query to abort
+	var closing chan struct{}
+	if !batch {
+		closing = make(chan struct{})
+		if notifier, ok := w.(http.CloseNotifier); ok {
+			// CloseNotify() is not guaranteed to send a notification when the query
+			// is closed. Use this channel to signal that the query is finished to
+			// prevent lingering goroutines that may be stuck.
+			done := make(chan struct{})
+			defer close(done)
+
+			notify := notifier.CloseNotify()
+			go func() {
+				// Wait for either the request to finish
+				// or for the client to disconnect
+				select {
+				case <-done:
+				case <-notify:
+					close(closing)
+				}
+			}()
+		} else {
+			defer close(closing)
+		}
 	}
 
 	// Execute query.
@@ -431,6 +437,14 @@ func (h *Handler) serveQuery(w http.ResponseWriter, r *http.Request, user *meta.
 		ReadOnly:  r.Method == "GET",
 		NodeID:    nodeID,
 	}, closing)
+
+	// If we are running in batch mode, open a goroutine to drain the results
+	// and return with a StatusNoContent.
+	if batch {
+		go h.batch(query, results)
+		h.writeHeader(w, http.StatusNoContent)
+		return
+	}
 
 	// if we're not chunking, this will be the in memory buffer for all results before sending to client
 	resp := Response{Results: make([]*influxql.Result, 0)}
@@ -515,6 +529,22 @@ func (h *Handler) serveQuery(w http.ResponseWriter, r *http.Request, user *meta.
 	if !chunked {
 		n, _ := w.Write(MarshalJSON(resp, pretty))
 		atomic.AddInt64(&h.stats.QueryRequestBytesTransmitted, int64(n))
+	}
+}
+
+// batch drains the results from a batched query and logs a message if it fails.
+func (h *Handler) batch(query *influxql.Query, results <-chan *influxql.Result) {
+	for r := range results {
+		// Drain the results and do nothing with them.
+		// If it fails, log the failure so there is at least a record of it.
+		if r.Err != nil {
+			// Do not log when a statement was not executed since there would
+			// have been an earlier error that was already logged.
+			if r.Err == influxql.ErrNotExecuted {
+				continue
+			}
+			h.Logger.Printf("error while running batch query: %s: %s", query, r.Err)
+		}
 	}
 }
 
